@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MLB HRR Finder — Hits+Runs+RBIs Over Probability & EV</title>
+<style>
+  :root{
+    --bg:#bfe3f5; --panel:#e2f1fb; --panel2:#f2f8fd; --line:#a6cbe2;
+    --text:#0e2a40; --muted:#4f6b80; --accent:#1f7fd4; --good:#1a7f37; --bad:#c1331f;
+    --warn:#9a6a00;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);color:var(--text);font-size:14px;line-height:1.45}
+  header{padding:18px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
+  h1{margin:0;font-size:19px;letter-spacing:.3px}
+  .sub{color:var(--muted);font-size:12.5px;margin-top:4px}
+  .controls{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;padding:16px 22px;
+    background:var(--panel);border-bottom:1px solid var(--line)}
+  .field{display:flex;flex-direction:column;gap:4px}
+  .field label{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+  input,select{background:var(--panel2);border:1px solid var(--line);color:var(--text);
+    border-radius:7px;padding:7px 9px;font-size:13px}
+  input[type=number]{width:92px}
+  .chk{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--text)}
+  .chk input{width:auto}
+  button{background:var(--accent);color:#ffffff;border:none;border-radius:7px;
+    padding:9px 18px;font-weight:600;font-size:13px;cursor:pointer}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  button.ghost{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+  #status{padding:10px 22px;color:var(--muted);font-size:12.5px;min-height:20px}
+  .bar{height:5px;background:var(--panel2);border-radius:3px;overflow:hidden;margin:0 22px}
+  .bar > div{height:100%;width:0;background:var(--accent);transition:width .2s}
+  table{width:calc(100% - 44px);margin:14px 22px 40px;border-collapse:collapse;font-size:13px}
+  th,td{padding:8px 9px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.4px;
+    cursor:pointer;user-select:none;position:sticky;top:0;background:var(--bg)}
+  tr:hover td{background:#d2e9f8}
+  .pct{font-weight:700}
+  .pos{color:var(--good)} .neg{color:var(--bad)}
+  .tag{font-size:10px;padding:2px 6px;border-radius:4px;background:var(--panel2);
+    color:var(--muted);border:1px solid var(--line)}
+  .tag.proj{color:var(--warn);border-color:var(--warn)}
+  .num{text-align:right}
+  details{margin:0 22px 18px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:0}
+  summary{padding:12px 16px;cursor:pointer;font-weight:600;color:var(--accent)}
+  .doc{padding:0 18px 16px;color:#25415a;font-size:13px}
+  .doc code{background:var(--panel2);padding:1px 5px;border-radius:4px}
+  .doc li{margin:5px 0}
+  .ev-in{width:78px}
+  .empty{color:var(--muted);padding:30px 22px}
+</style>
+</head>
+<body>
+<header>
+  <h1>⚾ MLB HRR Finder</h1>
+  <div class="sub">Live free data from the MLB Stats API. Estimates each batter's expected <b>Hits + Runs + RBIs</b> today, then the probability of going Over your line and the +/- EV vs your sportsbook price.</div>
+</header>
+
+<div class="controls">
+  <div class="field"><label>Date</label><input type="date" id="date"></div>
+  <div class="field"><label>HRR line</label><input type="number" id="line" value="1.5" min="0.5" max="5.5" step="0.5"></div>
+  <div class="field"><label>Min Over %</label><input type="number" id="thresh" value="50" min="0" max="100" step="1"></div>
+  <div class="field"><label>League BA</label><input type="number" id="lgba" value="0.245" min="0.18" max="0.30" step="0.001"></div>
+  <div class="field"><label>Default stake</label><input type="number" id="stake" value="100" min="1" step="1"></div>
+  <div class="field"><label class="chk"><input type="checkbox" id="confirmedOnly"> Confirmed lineups only</label></div>
+  <div class="field"><label>&nbsp;</label><button id="run">Find HRR</button></div>
+  <div class="field"><label>&nbsp;</label><button class="ghost" id="stop" disabled>Stop</button></div>
+</div>
+
+<div class="bar"><div id="prog"></div></div>
+<div id="status">Pick a date and click <b>Find HRR</b>. Lineups usually post 1–4 hours before first pitch — run closer to game time for confirmed lineups.</div>
+
+<details>
+  <summary>How the expected HRR & Over probability are calculated</summary>
+  <div class="doc">
+    <p>For each batter we estimate three per-plate-appearance rates — a hit rate, a run-scored rate, and an RBI rate — combine them with expected PAs to get an <b>expected H+R+RBI total (μ)</b>, then convert μ to the probability of going <b>Over your line</b> using a Poisson approximation.</p>
+    <ol>
+      <li><b>Per-AB hit rate (b)</b> blends: vs-handedness split (matching the starter's throwing arm), season AVG, and last-5-games AVG, weighted <code>0.45 / 0.35 / 0.20</code>. Small samples are shrunk toward season/league average (empirical-Bayes). If the batter has 8+ career AB vs the starter, that head-to-head AVG nudges the rate by 15%.</li>
+      <li><b>Pitching rate against (pp)</b> blends the opposing <b>starter's</b> BAA (~65%) with the opposing <b>team staff/bullpen</b> BAA (~35%). Thin starter samples are shrunk toward league average.</li>
+      <li><b>Matchup combine (log5 / Bill James):</b> <code>p_ab = (b·pp/L) / (b·pp/L + (1−b)(1−pp)/(1−L))</code>. Multiplied by park × weather × fatigue (see below).</li>
+      <li><b>Per-PA run rate (rR)</b> = season R/PA, shrunk toward league (~0.118). Scaled by lineup-spot factor (top-of-order scores more): 1→1.13, 2→1.10, 3→1.05, 4→1.00, 5→0.97, 6→0.93, 7→0.90, 8→0.87, 9→0.85. Adjusted by the same opponent/env factors (lighter weight — pitching affects runs less than hits).</li>
+      <li><b>Per-PA RBI rate (rI)</b> = season RBI/PA, shrunk toward league (~0.110). Scaled by lineup-spot RBI factor (middle order drives in more): 1→0.83, 2→0.92, 3→1.12, 4→1.18, 5→1.10, 6→1.00, 7→0.93, 8→0.88, 9→0.82.</li>
+      <li><b>Expected AB / PA</b> by lineup spot (AB: 1–2 → 4.4, 3 → 4.3, 4–5 → 4.1, 6–7 → 3.9, 8–9 → 3.6; PA ≈ AB × 1.13).</li>
+      <li><b>Expected HRR (μ)</b> = AB·p_ab + PA·rR + PA·rI.</li>
+      <li><b>Over probability:</b> <code>P(N ≥ ceil(line)) = 1 − Poisson_CDF(ceil(line)−1; μ)</code>. Poisson is a reasonable screen for low-count discrete totals; in reality H, R, RBI are positively correlated within a game (good days cluster), so true variance is a bit higher — treat outputs as a screen, not a guarantee.</li>
+    </ol>
+    <p><b>Environment adjustments</b> (same as the hits model):</p>
+    <ul>
+      <li><b>Park factor</b> — multi-year hits factors per stadium (Coors 1.10, Petco/SF/Sea 0.96, etc.). Applied at full weight to p_ab and at half weight to runs/RBI.</li>
+      <li><b>Weather</b> — live from <a href="https://open-meteo.com" target="_blank">Open-Meteo</a>. Average temp 6–9 pm local. <code>weatherMult = 1 + (°F − 70)/1500</code>, clamped to ±3%. Domes (TB, TOR) skip this.</li>
+      <li><b>Pitcher fatigue</b> — from the starter's recent game log. Short rest worsens opponent BAA: 0–2 days +6%, 3 days +3%, 4–7 neutral, 8–14 +1%, 15+ +2%. Extra +2% if last start ≥ 110 pitches on ≤4 days rest.</li>
+    </ul>
+    <p>The <b>Env</b> column shows the combined park × weather × fatigue multiplier as a single %. Hover for the breakdown.</p>
+    <p><b>EV (American odds):</b> implied prob from your line; profit-per-stake from the line; <code>EV = P·profit − (1−P)·stake</code>. <b>Edge</b> = model P − implied P. <b>Expected odds</b> are the fair American odds implied by the model.</p>
+    <p style="color:var(--warn)">This is a statistical model on free public data — not betting advice. Early-season samples are noisy.</p>
+  </div>
+</details>
+
+<table id="tbl">
+  <thead><tr>
+    <th data-k="name">Player</th>
+    <th data-k="team">Team</th>
+    <th data-k="order" class="num">Ord</th>
+    <th data-k="opp">Opp SP (hand)</th>
+    <th data-k="mu" class="num">xHRR (μ)</th>
+    <th data-k="p" class="num">Over %</th>
+    <th data-k="fair" class="num">Exp odds</th>
+    <th>Book odds</th>
+    <th data-k="impl" class="num">Impl %</th>
+    <th data-k="edge" class="num">Edge</th>
+    <th data-k="ev" class="num">EV</th>
+    <th data-k="env" class="num">Env</th>
+    <th>Lineup</th>
+  </tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<div class="empty" id="empty"></div>
+
+<script>
+const API = "https://statsapi.mlb.com/api/v1";
+const WX  = "https://api.open-meteo.com/v1/forecast";
+const cache = new Map();
+let abort = false;
+
+// Hits park factors (approx 3-year averages; 1.00 = neutral)
+const PARK = {
+  COL:1.10, CIN:1.04, BOS:1.04, KC:1.03, TEX:1.02, ARI:1.02, AZ:1.02,
+  CWS:1.01, NYY:1.01, BAL:1.00, TOR:1.00, PHI:1.00, ATL:1.00, HOU:1.00,
+  WSH:0.99, LAA:0.99, LAD:0.99, MIN:0.99, STL:0.99,
+  NYM:0.98, CHC:0.98, CLE:0.98, MIL:0.98, PIT:0.98,
+  DET:0.97, MIA:0.97,
+  SF:0.96, SD:0.96, TB:0.96, SEA:0.96,
+  ATH:1.00, OAK:1.00
+};
+const VENUE = {
+  ARI:{lat:33.4455,lon:-112.0667,dome:false}, AZ:{lat:33.4455,lon:-112.0667,dome:false},
+  ATL:{lat:33.8908,lon:-84.4678,dome:false},
+  BAL:{lat:39.2839,lon:-76.6217,dome:false},
+  BOS:{lat:42.3467,lon:-71.0972,dome:false},
+  CHC:{lat:41.9484,lon:-87.6553,dome:false},
+  CWS:{lat:41.8300,lon:-87.6338,dome:false},
+  CIN:{lat:39.0975,lon:-84.5072,dome:false},
+  CLE:{lat:41.4962,lon:-81.6852,dome:false},
+  COL:{lat:39.7559,lon:-104.9942,dome:false},
+  DET:{lat:42.3390,lon:-83.0485,dome:false},
+  HOU:{lat:29.7572,lon:-95.3556,dome:false},
+  KC:{lat:39.0517,lon:-94.4803,dome:false},
+  LAA:{lat:33.8003,lon:-117.8827,dome:false},
+  LAD:{lat:34.0739,lon:-118.2400,dome:false},
+  MIA:{lat:25.7781,lon:-80.2197,dome:false},
+  MIL:{lat:43.0280,lon:-87.9712,dome:false},
+  MIN:{lat:44.9817,lon:-93.2776,dome:false},
+  NYM:{lat:40.7571,lon:-73.8458,dome:false},
+  NYY:{lat:40.8296,lon:-73.9262,dome:false},
+  ATH:{lat:38.5803,lon:-121.5119,dome:false}, OAK:{lat:38.5803,lon:-121.5119,dome:false},
+  PHI:{lat:39.9061,lon:-75.1665,dome:false},
+  PIT:{lat:40.4469,lon:-80.0057,dome:false},
+  SD:{lat:32.7073,lon:-117.1566,dome:false},
+  SF:{lat:37.7786,lon:-122.3893,dome:false},
+  SEA:{lat:47.5914,lon:-122.3325,dome:false},
+  STL:{lat:38.6226,lon:-90.1928,dome:false},
+  TB:{lat:27.7682,lon:-82.6534,dome:true},
+  TEX:{lat:32.7472,lon:-97.0846,dome:false},
+  TOR:{lat:43.6414,lon:-79.3894,dome:true},
+  WSH:{lat:38.8730,lon:-77.0074,dome:false}
+};
+
+// Lineup-spot scaling factors
+const RUN_MULT = {1:1.13, 2:1.10, 3:1.05, 4:1.00, 5:0.97, 6:0.93, 7:0.90, 8:0.87, 9:0.85};
+const RBI_MULT = {1:0.83, 2:0.92, 3:1.12, 4:1.18, 5:1.10, 6:1.00, 7:0.93, 8:0.88, 9:0.82};
+const LG_RPPA  = 0.118;
+const LG_RBIPA = 0.110;
+
+const $ = id => document.getElementById(id);
+$("date").value = new Date(Date.now() - new Date().getTimezoneOffset()*60000).toISOString().slice(0,10);
+
+async function getJSON(url){
+  if(cache.has(url)) return cache.get(url);
+  const r = await fetch(url);
+  if(!r.ok) throw new Error(r.status+" "+url);
+  const j = await r.json();
+  cache.set(url, j);
+  return j;
+}
+const pAvg = s => { if(s==null) return null; const v=parseFloat(s); return isNaN(v)?null:v; };
+const shrink = (n, val, k, prior) => (val==null||n<=0) ? prior : (n*val + k*prior)/(n+k);
+const clamp = (x,a,b)=>Math.max(a,Math.min(b,x));
+
+function expAB(o){ if(!o) return 4.0; if(o<=2) return 4.4; if(o===3) return 4.3; if(o<=5) return 4.1; if(o<=7) return 3.9; return 3.6; }
+const expPA = o => expAB(o) * 1.13;
+function impliedFromAmerican(o){ return o<0 ? (-o)/((-o)+100) : 100/(o+100); }
+function profitPerStake(o, stake){ return o>0 ? stake*o/100 : stake*100/(-o); }
+function fairAmerican(p){ if(p<=0) return null; if(p>=1) return -100000;
+  return p>=0.5 ? Math.round(-100*p/(1-p)) : Math.round(100*(1-p)/p); }
+const fmtOdds = o => o==null ? "—" : (o>0?"+"+o:""+o);
+
+// Poisson P(N >= k) given mean mu
+function poissonOver(mu, k){
+  if(mu<=0) return k<=0 ? 1 : 0;
+  // CDF up to k-1
+  let term = Math.exp(-mu), cdf = term;
+  for(let i=1;i<k;i++){ term *= mu/i; cdf += term; }
+  return clamp(1 - cdf, 0, 1);
+}
+
+// ---- pitcher (hand + BAA), cached
+async function getPitcher(id, season){
+  if(!id) return null;
+  const key="P"+id;
+  if(cache.has(key)) return cache.get(key);
+  const d = await getJSON(`${API}/people/${id}?hydrate=stats(group=pitching,type=season,season=${season})`);
+  const pe = d.people[0];
+  const st = pe.stats && pe.stats[0] && pe.stats[0].splits && pe.stats[0].splits[0] ? pe.stats[0].splits[0].stat : {};
+  const obj = { id, name:pe.fullName, hand:(pe.pitchHand&&pe.pitchHand.code)||"R",
+                baa:pAvg(st.avg), ip:parseFloat(st.inningsPitched)||0 };
+  cache.set(key,obj); return obj;
+}
+async function getTeamBAA(teamId, season){
+  const key="T"+teamId;
+  if(cache.has(key)) return cache.get(key);
+  let baa=null;
+  try{ const d = await getJSON(`${API}/teams/${teamId}/stats?stats=season&group=pitching&season=${season}`);
+       baa = pAvg(d.stats[0].splits[0].stat.avg); }catch(e){}
+  cache.set(key,baa); return baa;
+}
+async function getBatters(side, lineups, teamId, season, confirmedOnly){
+  const arr = lineups && lineups[side+"Players"] ? lineups[side+"Players"] : [];
+  if(arr.length){
+    return arr.map((p,i)=>({ id:p.id, name:p.fullName, order:i+1, projected:false }));
+  }
+  if(confirmedOnly) return [];
+  const d = await getJSON(`${API}/teams/${teamId}/roster?rosterType=active`);
+  return d.roster
+    .filter(r => r.position && r.position.abbreviation!=="P" && r.position.type!=="Pitcher")
+    .map(r => ({ id:r.person.id, name:r.person.fullName, order:null, projected:true }));
+}
+async function getBatterStats(id, season){
+  const key="B"+id;
+  if(cache.has(key)) return cache.get(key);
+  const d = await getJSON(`${API}/people/${id}/stats?stats=season,lastXGames,statSplits&group=hitting&sitCodes=vl,vr&limit=5&season=${season}`);
+  const out={seasonBA:null, seasonAB:0, seasonPA:0, seasonR:0, seasonRBI:0,
+             last5BA:null, vL:null, vLab:0, vR:null, vRab:0};
+  for(const s of d.stats){
+    const t=s.type.displayName;
+    if(t==="season" && s.splits[0]){
+      const st=s.splits[0].stat;
+      out.seasonBA=pAvg(st.avg);
+      out.seasonAB=parseInt(st.atBats)||0;
+      out.seasonPA=parseInt(st.plateAppearances)||0;
+      out.seasonR=parseInt(st.runs)||0;
+      out.seasonRBI=parseInt(st.rbi)||0;
+    }
+    else if(t==="lastXGames" && s.splits[0]){ out.last5BA=pAvg(s.splits[0].stat.avg); }
+    else if(t==="statSplits"){
+      for(const sp of s.splits){
+        const desc=(sp.split.description||"").toLowerCase();
+        if(desc.includes("left")){ out.vL=pAvg(sp.stat.avg); out.vLab=parseInt(sp.stat.atBats)||0; }
+        if(desc.includes("right")){ out.vR=pAvg(sp.stat.avg); out.vRab=parseInt(sp.stat.atBats)||0; }
+      }
+    }
+  }
+  cache.set(key,out); return out;
+}
+async function getVsStarter(batId, pitId){
+  if(!pitId) return {ab:0,avg:null};
+  const key="V"+batId+"_"+pitId;
+  if(cache.has(key)) return cache.get(key);
+  let res={ab:0,avg:null};
+  try{
+    const d = await getJSON(`${API}/people/${batId}/stats?stats=vsPlayerTotal&group=hitting&opposingPlayerId=${pitId}`);
+    const sp = d.stats[0] && d.stats[0].splits[0];
+    if(sp){ res={ab:parseInt(sp.stat.atBats)||0, avg:pAvg(sp.stat.avg)}; }
+  }catch(e){}
+  cache.set(key,res); return res;
+}
+
+async function getWeather(homeAbbr, gameDate){
+  const v = VENUE[homeAbbr];
+  if(!v) return { tempF:null, dome:false, missing:true };
+  if(v.dome) return { tempF:null, dome:true };
+  const date = gameDate.slice(0,10);
+  const key="W"+homeAbbr+date;
+  if(cache.has(key)) return cache.get(key);
+  let tempF=null;
+  try{
+    const url=`${WX}?latitude=${v.lat}&longitude=${v.lon}&hourly=temperature_2m&temperature_unit=fahrenheit&start_date=${date}&end_date=${date}&timezone=auto`;
+    const d=await getJSON(url);
+    const arr=d.hourly && d.hourly.temperature_2m;
+    if(arr && arr.length){
+      const slice=arr.slice(18,22).filter(x=>x!=null);
+      if(slice.length) tempF = slice.reduce((a,b)=>a+b,0)/slice.length;
+    }
+  }catch(e){}
+  const res={tempF, dome:false};
+  cache.set(key,res); return res;
+}
+function weatherMult(w){
+  if(!w || w.dome || w.tempF==null) return 1.0;
+  return clamp(1 + (w.tempF-70)/1500, 0.97, 1.03);
+}
+
+async function getPitcherFatigue(pid, gameDate, season){
+  if(!pid) return {rest:null,lastPitches:null};
+  const key="F"+pid+gameDate.slice(0,10);
+  if(cache.has(key)) return cache.get(key);
+  let res={rest:null, lastPitches:null};
+  try{
+    const d=await getJSON(`${API}/people/${pid}/stats?stats=gameLog&group=pitching&season=${season}`);
+    const splits=(d.stats[0]&&d.stats[0].splits)||[];
+    const gd=new Date(gameDate.slice(0,10)+"T00:00:00Z");
+    let last=null;
+    for(const s of splits){
+      const sd=new Date(s.date+"T00:00:00Z");
+      if(sd<gd && (!last||sd>new Date(last.date+"T00:00:00Z"))) last=s;
+    }
+    if(last){
+      const diff=Math.round((gd-new Date(last.date+"T00:00:00Z"))/86400000);
+      res={ rest:diff,
+            lastPitches: parseInt(last.stat.numberOfPitches)||parseInt(last.stat.pitchesThrown)||null };
+    }
+  }catch(e){}
+  cache.set(key,res); return res;
+}
+function fatigueMult(f){
+  if(!f || f.rest==null) return 1.0;
+  let m;
+  if(f.rest<=2) m=1.06;
+  else if(f.rest===3) m=1.03;
+  else if(f.rest<=7) m=1.00;
+  else if(f.rest<=14) m=1.01;
+  else m=1.02;
+  if(f.lastPitches && f.lastPitches>=110 && f.rest<=4) m+=0.02;
+  return m;
+}
+
+function modelHRR(bstat, vs, starter, bullpenBAA, L, order, parkPF, wxM, fatM){
+  // ---- per-AB hit rate (matchup)
+  const seasonAdj = shrink(bstat.seasonAB, bstat.seasonBA, 60, L);
+  let splitBA=null, splitAB=0;
+  if(starter){ if(starter.hand==="L"){ splitBA=bstat.vL; splitAB=bstat.vLab; } else { splitBA=bstat.vR; splitAB=bstat.vRab; } }
+  const splitAdj = shrink(splitAB, splitBA, 50, seasonAdj);
+  const last5 = bstat.last5BA!=null ? bstat.last5BA : seasonAdj;
+  let b = 0.45*splitAdj + 0.35*seasonAdj + 0.20*last5;
+  if(vs.ab>=8 && vs.avg!=null) b = 0.85*b + 0.15*vs.avg;
+  b = clamp(b, 0.12, 0.45);
+
+  const starterBAA = starter ? shrink(Math.round(starter.ip*3.1), starter.baa, 100, L) : L;
+  const bull = bullpenBAA!=null ? bullpenBAA : L;
+  let pp = starter ? (0.65*starterBAA + 0.35*bull) : bull;
+  pp = pp * (fatM||1);
+  pp = clamp(pp, 0.15, 0.45);
+
+  const num = b*pp/L;
+  const den = num + (1-b)*(1-pp)/(1-L);
+  let pab = num/den;
+  pab = pab * (parkPF||1) * (wxM||1);
+  pab = clamp(pab, 0.02, 0.65);
+
+  // ---- per-PA run & RBI rates (shrunk season rates × lineup × env)
+  const rateR_raw = bstat.seasonPA>0 ? bstat.seasonR/bstat.seasonPA : null;
+  const rateI_raw = bstat.seasonPA>0 ? bstat.seasonRBI/bstat.seasonPA : null;
+  const rR_base = shrink(bstat.seasonPA, rateR_raw, 80, LG_RPPA);
+  const rI_base = shrink(bstat.seasonPA, rateI_raw, 80, LG_RBIPA);
+  const runM = RUN_MULT[order] || 1.0;
+  const rbiM = RBI_MULT[order] || 1.0;
+  // softer env weight for runs/RBI (half exponent)
+  const envH = (parkPF||1) * (wxM||1) * (fatM||1);
+  const envHalf = Math.sqrt(envH);
+  let rR = rR_base * runM * envHalf;
+  let rI = rI_base * rbiM * envHalf;
+  rR = clamp(rR, 0.02, 0.30);
+  rI = clamp(rI, 0.02, 0.30);
+
+  const AB = expAB(order);
+  const PA = expPA(order);
+  const xH   = AB * pab;
+  const xR   = PA * rR;
+  const xRBI = PA * rI;
+  const mu = xH + xR + xRBI;
+
+  return { mu, xH, xR, xRBI, b, pp, pab, rR, rI };
+}
+
+async function pool(items, worker, n){
+  const res=[]; let i=0;
+  async function next(){ while(i<items.length && !abort){ const idx=i++; try{ res[idx]=await worker(items[idx], idx); }catch(e){ res[idx]=null; } } }
+  await Promise.all(Array.from({length:n}, next));
+  return res;
+}
+
+let results=[];
+function setStatus(t){ $("status").innerHTML=t; }
+function setProg(done,total){ $("prog").style.width = total? (100*done/total)+"%":"0"; }
+
+async function run(){
+  abort=false; results=[]; $("rows").innerHTML=""; $("empty").textContent=""; setProg(0,1);
+  $("run").disabled=true; $("stop").disabled=false;
+  const date=$("date").value, season=date.slice(0,4);
+  const confirmedOnly=$("confirmedOnly").checked;
+  const L=parseFloat($("lgba").value)||0.245;
+
+  setStatus("Loading today's schedule…");
+  let sched;
+  try{ sched = await getJSON(`${API}/schedule?sportId=1&date=${date}&hydrate=probablePitcher,lineups,team`); }
+  catch(e){ setStatus("Failed to load schedule: "+e.message); $("run").disabled=false; $("stop").disabled=true; return; }
+  const games = (sched.dates[0]&&sched.dates[0].games)||[];
+  if(!games.length){ setStatus("No MLB games scheduled on "+date+"."); $("run").disabled=false; $("stop").disabled=true; return; }
+
+  setStatus(`Found ${games.length} games. Loading pitchers & lineups…`);
+
+  const tasks=[];
+  for(const g of games){
+    const homeT=g.teams.home.team, awayT=g.teams.away.team;
+    const homeAbbr = homeT.abbreviation||"";
+    const homeSP = await getPitcher(g.teams.home.probablePitcher && g.teams.home.probablePitcher.id, season);
+    const awaySP = await getPitcher(g.teams.away.probablePitcher && g.teams.away.probablePitcher.id, season);
+    const homeStaff = await getTeamBAA(homeT.id, season);
+    const awayStaff = await getTeamBAA(awayT.id, season);
+    const pf = PARK[homeAbbr]!=null ? PARK[homeAbbr] : 1.0;
+    const wx = await getWeather(homeAbbr, g.gameDate);
+    const wxM = weatherMult(wx);
+    const homeFat = await getPitcherFatigue(homeSP&&homeSP.id, g.gameDate, season);
+    const awayFat = await getPitcherFatigue(awaySP&&awaySP.id, g.gameDate, season);
+    const homeFatM = fatigueMult(homeFat);
+    const awayFatM = fatigueMult(awayFat);
+    if(abort) break;
+    const awayBat = await getBatters("away", g.lineups, awayT.id, season, confirmedOnly);
+    for(const b of awayBat) tasks.push({...b, team:awayT.abbreviation||awayT.name, teamFull:awayT.name,
+      starter:homeSP, bullpen:homeStaff, side:"away",
+      pf, wxM, fatM:homeFatM, env:{park:homeAbbr, pf, wx, fat:homeFat}});
+    const homeBat = await getBatters("home", g.lineups, homeT.id, season, confirmedOnly);
+    for(const b of homeBat) tasks.push({...b, team:homeT.abbreviation||homeT.name, teamFull:homeT.name,
+      starter:awaySP, bullpen:awayStaff, side:"home",
+      pf, wxM, fatM:awayFatM, env:{park:homeAbbr, pf, wx, fat:awayFat}});
+  }
+
+  if(!tasks.length){ setStatus("No lineups available yet"+(confirmedOnly?" (confirmed-only is on — try unchecking it).":". Try again closer to game time.")); $("run").disabled=false; $("stop").disabled=true; return; }
+
+  setStatus(`Computing ${tasks.length} batters…`);
+  let done=0;
+  const computed = await pool(tasks, async (t)=>{
+    const bstat = await getBatterStats(t.id, season);
+    const vs = await getVsStarter(t.id, t.starter && t.starter.id);
+    const m = modelHRR(bstat, vs, t.starter, t.bullpen, L, t.order, t.pf, t.wxM, t.fatM);
+    done++; setProg(done,tasks.length);
+    if(done%5===0) setStatus(`Computing… ${done}/${tasks.length}`);
+    return { ...t, mu:m.mu, xH:m.xH, xR:m.xR, xRBI:m.xRBI, seasonAB:bstat.seasonAB };
+  }, 6);
+
+  results = computed.filter(Boolean);
+  const keep=[];
+  const projGroups={};
+  for(const r of results){ if(r.projected){ (projGroups[r.team]=projGroups[r.team]||[]).push(r); } else keep.push(r); }
+  for(const tm in projGroups){
+    projGroups[tm].sort((a,b)=>b.seasonAB-a.seasonAB);
+    projGroups[tm].slice(0,9).forEach((r,i)=>{ r.order = r.order||(i+1); keep.push(r); });
+  }
+  results=keep;
+  render();
+  setStatus(`Done — ${results.length} batters analyzed across ${games.length} games. Showing Over ${$("line").value} ≥ ${$("thresh").value}%.`);
+  $("run").disabled=false; $("stop").disabled=true; setProg(1,1);
+}
+
+let sortKey="p", sortDir=-1;
+function render(){
+  const thr=(parseFloat($("thresh").value)||0)/100;
+  const stake=parseFloat($("stake").value)||100;
+  const line=parseFloat($("line").value)||1.5;
+  const k=Math.ceil(line); // P(N >= k) is the Over probability for a half-line
+  // attach over-probability per row using current line
+  for(const r of results){ r.p = poissonOver(r.mu, k); }
+  let rows=results.filter(r=>r.p>=thr);
+  rows.sort((a,b)=>{
+    let av,bv;
+    switch(sortKey){
+      case "name":av=a.name;bv=b.name;break;
+      case "team":av=a.team;bv=b.team;break;
+      case "order":av=a.order||99;bv=b.order||99;break;
+      case "opp":av=(a.starter&&a.starter.name)||"";bv=(b.starter&&b.starter.name)||"";break;
+      case "mu":av=a.mu;bv=b.mu;break;
+      case "env":av=(a.pf||1)*(a.wxM||1)*(a.fatM||1);bv=(b.pf||1)*(b.wxM||1)*(b.fatM||1);break;
+      default:av=a.p;bv=b.p;
+    }
+    if(av<bv) return -1*sortDir; if(av>bv) return 1*sortDir; return 0;
+  });
+  const tb=$("rows"); tb.innerHTML="";
+  if(!rows.length){ $("empty").textContent = results.length ? "No batters meet the threshold. Lower 'Min Over %' or 'HRR line' to see more." : ""; }
+  else $("empty").textContent="";
+  for(const r of rows){
+    const fair=fairAmerican(r.p);
+    const tr=document.createElement("tr");
+    const oppTxt = r.starter ? `${r.starter.name} (${r.starter.hand}${r.starter.baa!=null?", "+r.starter.baa.toFixed(3).slice(1)+" BAA":""})` : "bullpen/TBD";
+    const envMult = (r.pf||1)*(r.wxM||1)*(r.fatM||1);
+    const envPct = Math.round((envMult-1)*100);
+    const envStr = (envPct>=0?"+":"")+envPct+"%";
+    const envCls = envPct>0?"pos":(envPct<0?"neg":"");
+    const wx = r.env && r.env.wx;
+    const fat = r.env && r.env.fat;
+    const envTitle = `Park ${(r.pf||1).toFixed(2)} (${r.env&&r.env.park||"?"}) · `
+      + (wx ? (wx.dome?"dome":(wx.tempF!=null?wx.tempF.toFixed(0)+"°F":"wx ?")) : "wx ?")
+      + ` · SP rest ${fat&&fat.rest!=null?fat.rest+"d":"?"}`
+      + (fat&&fat.lastPitches?` (${fat.lastPitches}p)`:"");
+    const muTitle = `H ${r.xH.toFixed(2)} + R ${r.xR.toFixed(2)} + RBI ${r.xRBI.toFixed(2)}`;
+    tr.innerHTML=`
+      <td>${r.name}</td>
+      <td>${r.team}</td>
+      <td class="num">${r.order||"—"}</td>
+      <td>${oppTxt}</td>
+      <td class="num" title="${muTitle}">${r.mu.toFixed(2)}</td>
+      <td class="num pct">${(r.p*100).toFixed(1)}%</td>
+      <td class="num">${fmtOdds(fair)}</td>
+      <td><input class="ev-in" type="number" placeholder="-110" data-p="${r.p}"></td>
+      <td class="num impl">—</td>
+      <td class="num edge">—</td>
+      <td class="num ev">—</td>
+      <td class="num ${envCls}" title="${envTitle}">${envStr}</td>
+      <td>${r.projected?'<span class="tag proj">projected</span>':'<span class="tag">confirmed</span>'}</td>`;
+    const inp=tr.querySelector(".ev-in");
+    inp.addEventListener("input",()=>recalcRow(tr,r.p,stake));
+    tb.appendChild(tr);
+  }
+}
+function recalcRow(tr,p,stake){
+  const v=parseFloat(tr.querySelector(".ev-in").value);
+  const implC=tr.querySelector(".impl"), edgeC=tr.querySelector(".edge"), evC=tr.querySelector(".ev");
+  if(isNaN(v)||v===0){ implC.textContent="—"; edgeC.textContent="—"; evC.textContent="—"; edgeC.className="num edge"; evC.className="num ev"; return; }
+  const impl=impliedFromAmerican(v);
+  const edge=p-impl;
+  const ev=p*profitPerStake(v,stake) - (1-p)*stake;
+  implC.textContent=(impl*100).toFixed(1)+"%";
+  edgeC.textContent=(edge>=0?"+":"")+(edge*100).toFixed(1)+"%";
+  edgeC.className="num edge "+(edge>=0?"pos":"neg");
+  evC.textContent=(ev>=0?"+":"")+"$"+ev.toFixed(2);
+  evC.className="num ev "+(ev>=0?"pos":"neg");
+}
+
+document.querySelectorAll("th[data-k]").forEach(th=>{
+  th.addEventListener("click",()=>{ const k=th.dataset.k;
+    if(sortKey===k) sortDir*=-1; else { sortKey=k; sortDir=(k==="name"||k==="team"||k==="opp")?1:-1; }
+    render(); });
+});
+$("run").addEventListener("click",run);
+$("stop").addEventListener("click",()=>{ abort=true; setStatus("Stopped."); $("run").disabled=false; $("stop").disabled=true; });
+$("thresh").addEventListener("input",render);
+$("stake").addEventListener("input",render);
+$("line").addEventListener("input",render);
+</script>
+</body>
+</html>
