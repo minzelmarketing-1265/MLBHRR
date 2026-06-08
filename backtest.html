@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MLB HRR Backtest</title>
+<style>
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#bfe3f5;color:#0e2a40;font-size:13px}
+  header{padding:14px 22px;background:#e2f1fb;border-bottom:1px solid #a6cbe2}
+  h1{margin:0;font-size:17px}
+  .controls{display:flex;gap:12px;align-items:flex-end;padding:14px 22px;background:#e2f1fb;border-bottom:1px solid #a6cbe2;flex-wrap:wrap}
+  .field{display:flex;flex-direction:column;gap:3px}
+  label{font-size:10px;text-transform:uppercase;color:#4f6b80;letter-spacing:.4px}
+  input{background:#f2f8fd;border:1px solid #a6cbe2;border-radius:6px;padding:6px 8px;font-size:13px;width:130px}
+  button{background:#1f7fd4;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-weight:600;cursor:pointer}
+  #status{padding:10px 22px;color:#4f6b80}
+  pre{background:#f2f8fd;border:1px solid #a6cbe2;border-radius:6px;padding:14px;margin:14px 22px;overflow:auto;font-size:12px;line-height:1.45}
+  table{border-collapse:collapse;font-size:12px;margin:8px 22px}
+  th,td{padding:5px 9px;border:1px solid #a6cbe2;text-align:right}
+  th{background:#e2f1fb}
+  .navlink{font-size:12px;color:#1f7fd4;text-decoration:none;margin-left:14px}
+</style>
+</head>
+<body>
+<header>
+  <h1>HRR Backtest <a class="navlink" href="index.html">[live tool]</a></h1>
+  <div style="font-size:12px;color:#4f6b80;margin-top:3px">Replays model on past games using boxscore actuals. Tip: pick a range with confirmed lineups (avoid today/future). Lookahead caveat: season stats are season-totals (not point-in-time).</div>
+</header>
+<div class="controls">
+  <div class="field"><label>Start date</label><input type="date" id="start"></div>
+  <div class="field"><label>End date</label><input type="date" id="end"></div>
+  <div class="field"><label>Max games/day</label><input type="number" id="maxg" value="6" min="1" max="20"></div>
+  <div class="field"><label>Concurrency</label><input type="number" id="conc" value="8" min="1" max="16"></div>
+  <div class="field"><label>League BA</label><input type="number" id="lgba" value="0.245" step="0.001"></div>
+  <div class="field"><label>μ scale override</label><input type="number" id="muScale" value="0.93" step="0.01"></div>
+  <div class="field"><label>&nbsp;</label><button id="run">Run backtest</button></div>
+  <div class="field"><label>&nbsp;</label><button id="stop" style="background:transparent;color:#1f7fd4;border:1px solid #1f7fd4" disabled>Stop</button></div>
+</div>
+<div id="status">Defaults: 2024-08-15..2024-08-19, 6 games/day. Click Run.</div>
+<div id="summary"></div>
+<pre id="log"></pre>
+
+<script src="model.js"></script>
+<script>
+const H = window.HRR;
+const $ = id => document.getElementById(id);
+let abort=false;
+const abortRef = { get aborted(){ return abort; } };
+
+$("start").value = "2024-08-15";
+$("end").value = "2024-08-19";
+
+function log(s){ $("log").textContent += s + "\n"; $("log").scrollTop = $("log").scrollHeight; }
+function setStatus(s){ $("status").textContent = s; }
+
+// Pull boxscore actuals for a game: returns map playerId -> {ab,pa,h,r,rbi,order}
+async function getBoxActuals(gamePk){
+  const d = await H.getJSON(`${H.API}/game/${gamePk}/boxscore`);
+  const out = {};
+  for(const side of ["home","away"]){
+    const team = d.teams[side];
+    const players = team.players || {};
+    // batting order is in team.batters (array of playerIds in order)
+    const ordList = team.battingOrder || team.batters || [];
+    const orderMap = {};
+    // battingOrder is sometimes 101,102,201 style (1xx=starter, 2xx=sub). Filter starters.
+    let pos = 0;
+    for(const code of ordList){
+      const pid = typeof code === "number" ? code : parseInt(code);
+      // If code looks like 101,102… use 100s digit; otherwise just sequential
+      if(code > 900 && code < 1000){ /* skip */ }
+      if(!orderMap[pid]) orderMap[pid] = (++pos);
+      if(pos>=9) break;
+    }
+    for(const pk in players){
+      const p = players[pk];
+      if(!p.stats || !p.stats.batting) continue;
+      const bs = p.stats.batting;
+      const ab = parseInt(bs.atBats)||0;
+      const pa = parseInt(bs.plateAppearances)||0;
+      if(ab===0 && pa===0) continue;
+      const pid = p.person.id;
+      out[pid] = {
+        ab, pa,
+        h: parseInt(bs.hits)||0,
+        r: parseInt(bs.runs)||0,
+        rbi: parseInt(bs.rbi)||0,
+        order: orderMap[pid] || null,
+        name: p.person.fullName,
+        teamSide: side
+      };
+    }
+  }
+  return out;
+}
+
+async function runBacktest(){
+  abort=false;
+  $("log").textContent=""; $("summary").innerHTML="";
+  $("run").disabled=true; $("stop").disabled=false;
+  const start = $("start").value, end = $("end").value;
+  const maxG = parseInt($("maxg").value)||6;
+  const conc = parseInt($("conc").value)||8;
+  const L = parseFloat($("lgba").value)||0.245;
+  const muScale = parseFloat($("muScale").value)||1.0;
+  H.PARAMS.muScale = muScale;
+  log(`Backtest ${start} → ${end}, max ${maxG} games/day, μ scale ${muScale.toFixed(3)}`);
+
+  // Iterate days
+  const days=[];
+  for(let d=new Date(start); d<=new Date(end); d.setDate(d.getDate()+1)){
+    days.push(d.toISOString().slice(0,10));
+  }
+
+  const allBatters = []; // each: { mu, h+r+rbi actual, predOverK probabilities for k=1..4 }
+  for(const date of days){
+    if(abort) break;
+    setStatus(`Date ${date}: loading schedule…`);
+    let sched;
+    try{ sched = await H.getJSON(`${H.API}/schedule?sportId=1&date=${date}&hydrate=probablePitcher,lineups,team`); }
+    catch(e){ log(`  ${date}: schedule err ${e.message}`); continue; }
+    const allGames = (sched.dates[0]&&sched.dates[0].games)||[];
+    const games = allGames.filter(g => g.status && (g.status.codedGameState==="F" || g.status.statusCode==="F" || g.status.detailedState==="Final")).slice(0, maxG);
+    log(`  ${date}: ${games.length}/${allGames.length} final games used`);
+    const season = date.slice(0,4);
+
+    for(const g of games){
+      if(abort) break;
+      const homeT = g.teams.home.team, awayT = g.teams.away.team;
+      const homeAbbr = homeT.abbreviation || "";
+      let actuals;
+      try{ actuals = await getBoxActuals(g.gamePk); }catch(e){ log(`    game ${g.gamePk}: box err ${e.message}`); continue; }
+      const homeSP = await H.getPitcher(g.teams.home.probablePitcher && g.teams.home.probablePitcher.id, season);
+      const awaySP = await H.getPitcher(g.teams.away.probablePitcher && g.teams.away.probablePitcher.id, season);
+      const homeStaff = await H.getTeamBAA(homeT.id, season);
+      const awayStaff = await H.getTeamBAA(awayT.id, season);
+      const pf = H.PARK[homeAbbr]!=null ? H.PARK[homeAbbr] : 1.0;
+      const wx = await H.getWeather(homeAbbr, g.gameDate);
+      const wxM = H.weatherMult(wx);
+      const homeFat = await H.getPitcherFatigue(homeSP&&homeSP.id, g.gameDate, season);
+      const awayFat = await H.getPitcherFatigue(awaySP&&awaySP.id, g.gameDate, season);
+      const homeFatM = H.fatigueMult(homeFat);
+      const awayFatM = H.fatigueMult(awayFat);
+
+      // build tasks for batters who had >=1 PA (i.e. actually played)
+      const tasks = [];
+      for(const pid in actuals){
+        const a = actuals[pid];
+        if(!a.order) continue;            // skip subs without batting-order index
+        if(a.pa < 3) continue;            // need decent sample to score; pinch-hits skew
+        const side = a.teamSide;
+        const isHome = side==="home";
+        const starter = isHome ? awaySP : homeSP;
+        const staff   = isHome ? awayStaff : homeStaff;
+        const fatM    = isHome ? awayFatM : homeFatM;
+        tasks.push({pid:parseInt(pid), a, starter, staff, fatM, pf, wxM, order:a.order, season, name:a.name});
+      }
+      await H.pool(tasks, async (t)=>{
+        const bstat = await H.getBatterStats(t.pid, t.season);
+        const vs = await H.getVsStarter(t.pid, t.starter && t.starter.id);
+        const m = H.modelHRR(bstat, vs, t.starter, t.staff, L, t.order, t.pf, t.wxM, t.fatM);
+        const actualHRR = t.a.h + t.a.r + t.a.rbi;
+        allBatters.push({
+          name: t.name, mu: m.mu, actual: actualHRR,
+          pOver1: H.poissonOver(m.mu, 1),
+          pOver2: H.poissonOver(m.mu, 2),
+          pOver3: H.poissonOver(m.mu, 3),
+          pOver4: H.poissonOver(m.mu, 4),
+          ab: t.a.ab, pa: t.a.pa, h: t.a.h, r: t.a.r, rbi: t.a.rbi,
+          order: t.order
+        });
+      }, conc, abortRef);
+
+      setStatus(`Date ${date}: ${allBatters.length} batters scored so far…`);
+    }
+  }
+
+  log(`\nScored ${allBatters.length} batter-games. Computing metrics…`);
+  showMetrics(allBatters);
+  $("run").disabled=false; $("stop").disabled=true;
+  setStatus(`Done. ${allBatters.length} batter-games scored.`);
+}
+
+function showMetrics(rows){
+  if(!rows.length){ log("No rows."); return; }
+  const sum = rows.reduce((s,r)=>{ s.mu+=r.mu; s.act+=r.actual; s.n++; return s;}, {mu:0,act:0,n:0});
+  const meanMu = sum.mu/sum.n, meanAct = sum.act/sum.n;
+  let html = `<table><tr><th>Metric</th><th>Value</th></tr>`;
+  html += `<tr><td>N batter-games</td><td>${sum.n}</td></tr>`;
+  html += `<tr><td>Mean predicted μ</td><td>${meanMu.toFixed(3)}</td></tr>`;
+  html += `<tr><td>Mean actual HRR</td><td>${meanAct.toFixed(3)}</td></tr>`;
+  html += `<tr><td>μ bias (pred − act)</td><td>${(meanMu-meanAct).toFixed(3)}</td></tr>`;
+  html += `<tr><td>Suggested μ-scale fix</td><td>${(meanAct/meanMu).toFixed(3)}</td></tr>`;
+  html += `</table>`;
+
+  // For each line k=1,2,3 compute Brier, log-loss, calibration, hit rate, ROI @ -110 if model says ≥55%
+  for(const k of [1,2,3]){
+    const buckets = Array.from({length:10},()=>({n:0, pSum:0, hit:0}));
+    let brier=0, ll=0, n=0, hits=0;
+    let betsN=0, betsHit=0, roi=0;     // assume −110 line; stake 100, profit 90.91
+    for(const r of rows){
+      const p = r["pOver"+k];
+      const hit = r.actual >= k ? 1 : 0;
+      brier += (p-hit)**2;
+      const pp = Math.max(1e-6, Math.min(1-1e-6, p));
+      ll += -(hit*Math.log(pp) + (1-hit)*Math.log(1-pp));
+      hits += hit; n++;
+      const b = Math.min(9, Math.floor(p*10));
+      buckets[b].n++; buckets[b].pSum+=p; buckets[b].hit+=hit;
+      if(p>=0.55){ betsN++; betsHit+=hit; roi += hit ? 90.9091 : -100; }
+    }
+    html += `<h3 style="margin:16px 22px 4px">Over ${k-0.5} (need ≥${k})</h3>`;
+    html += `<table style="margin:6px 22px"><tr><th>N</th><th>Base rate</th><th>Mean pred</th><th>Brier</th><th>LogLoss</th><th>Bets @ p≥55%</th><th>Hit%</th><th>ROI/$100</th></tr>`;
+    const meanPred = rows.reduce((s,r)=>s+r["pOver"+k],0)/n;
+    html += `<tr><td>${n}</td><td>${(hits/n*100).toFixed(1)}%</td><td>${(meanPred*100).toFixed(1)}%</td><td>${(brier/n).toFixed(4)}</td><td>${(ll/n).toFixed(4)}</td><td>${betsN}</td><td>${betsN? (betsHit/betsN*100).toFixed(1)+"%":"—"}</td><td>${betsN? "$"+(roi/betsN).toFixed(2):"—"}</td></tr></table>`;
+    // calibration table
+    html += `<table style="margin:6px 22px"><tr><th>Pred bin</th>`;
+    for(let i=0;i<10;i++) html += `<th>${i*10}-${i*10+10}</th>`;
+    html += `</tr><tr><td>n</td>`;
+    for(const b of buckets) html += `<td>${b.n}</td>`;
+    html += `</tr><tr><td>avg pred</td>`;
+    for(const b of buckets) html += `<td>${b.n? (b.pSum/b.n*100).toFixed(0)+"%":"—"}</td>`;
+    html += `</tr><tr><td>actual</td>`;
+    for(const b of buckets) html += `<td>${b.n? (b.hit/b.n*100).toFixed(0)+"%":"—"}</td>`;
+    html += `</tr></table>`;
+  }
+
+  // breakdown of H vs R vs RBI: actuals
+  const hSum = rows.reduce((s,r)=>s+r.h,0)/rows.length;
+  const rSum = rows.reduce((s,r)=>s+r.r,0)/rows.length;
+  const iSum = rows.reduce((s,r)=>s+r.rbi,0)/rows.length;
+  html += `<h3 style="margin:16px 22px 4px">Component means (actual)</h3>`;
+  html += `<table style="margin:6px 22px"><tr><th>H/G</th><th>R/G</th><th>RBI/G</th></tr><tr><td>${hSum.toFixed(3)}</td><td>${rSum.toFixed(3)}</td><td>${iSum.toFixed(3)}</td></tr></table>`;
+
+  $("summary").innerHTML = html;
+  // Also dump compact JSON to console for programmatic access
+  window.__BACKTEST_RESULTS__ = rows;
+  window.__BACKTEST_SUMMARY__ = { n:sum.n, meanMu, meanAct, suggestedMuScale: meanAct/meanMu };
+  console.log("BACKTEST_DONE", JSON.stringify(window.__BACKTEST_SUMMARY__));
+}
+
+$("run").addEventListener("click", runBacktest);
+$("stop").addEventListener("click", ()=>{ abort=true; setStatus("Stopped."); $("run").disabled=false; $("stop").disabled=true; });
+window.runBacktest = runBacktest;
+</script>
+</body>
+</html>
