@@ -87,7 +87,7 @@
       <li><b>Expected HRR (μ)</b> = AB·p_ab + PA·rR + PA·rI, with a global calibration multiplier from backtest.</li>
       <li><b>Over probability:</b> <code>P(N ≥ ceil(line)) = 1 − Poisson_CDF(ceil(line)−1; μ)</code>.</li>
     </ol>
-    <p>See the <a href="backtest.html">backtest page</a> for calibration metrics. Current parameters are tuned from a 950-batter-game backtest (Jul 19–28, 2024): global μ-scale 0.93, league priors 0.108 R/PA & 0.104 RBI/PA, and a Platt-style calibration (slope 0.88, intercept −0.02) on Over 0.5/1.5 probabilities to absorb Poisson tail overconfidence. Validated out-of-sample (Aug 10–23, 2024, n=1,314): mean μ vs actual within 0.034, Over 1.5 ROI at p≥0.55 = +$14.5/$100 (60% hit on 300 bets), Over 0.5 at p≥0.70 = +$39.5/$100 (73% hit on 862 bets).</p>
+    <p>See the <a href="backtest.html">backtest page</a> for calibration metrics. Parameters retuned from a Sep 1–7, 2024 out-of-sample backtest (n=854): global μ-scale 0.87, league priors 0.108 R/PA &amp; 0.104 RBI/PA, and a Platt-style calibration (slope 0.85, intercept −0.03) on Over 0.5/1.5 probabilities to absorb Poisson tail overconfidence. Validation on the same window: mean μ 1.740 vs actual 1.744 (0.2% bias); Over 0.5 ROI at p≥0.70 = +$43.8/$100 (75% hit on 239 bets); Over 1.5 ROI at p≥0.55 = +$9.1/$100 (57% hit on 28 bets).</p>
     <p style="color:var(--warn)">Statistical model on free public data — not betting advice.</p>
   </div>
 </details>

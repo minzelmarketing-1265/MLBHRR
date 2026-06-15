@@ -232,9 +232,9 @@ const PARAMS = {
   rateClampLo: 0.02, rateClampHi: 0.30,
   bClampLo: 0.12, bClampHi: 0.45,
   ppClampLo: 0.15, ppClampHi: 0.45,
-  muScale: 0.93,           // global μ calibration multiplier (from backtest, ~7.8% bias)
-  overCalibSlope: 0.88,     // Platt-style calibration applied AFTER Poisson Over prob
-  overCalibIntercept: -0.02 // tightened from +0.02 after Aug out-of-sample showed ~4pt residual
+  muScale: 0.87,           // tightened from 0.93 after Sep 1-7 2024 backtest (n=854) showed +6.7% μ bias
+  overCalibSlope: 0.85,     // Platt-style calibration applied AFTER Poisson Over prob
+  overCalibIntercept: -0.03 // shaved further after Sep backtest showed 7pp residual in 50-60% Over 1.5 bin
 };
 
 function modelHRR(bstat, vs, starter, bullpenBAA, L, order, parkPF, wxM, fatM){
